@@ -76,13 +76,20 @@ header[data-testid="stHeader"] { background: transparent; height: 0; }
 .brand .name { font-weight: 700; font-size: clamp(.85rem, 2.6vw, 1.05rem); letter-spacing: .02em; line-height: 1.2; }
 .brand .name small { display: block; font-weight: 500; opacity: .85; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }
 
-/* STEP CARDS */
-.step { display: flex; gap: .9rem; align-items: flex-start; }
-.step .num { flex: 0 0 auto; width: 38px; height: 38px; border-radius: 12px; color: #fff; font-weight: 800;
-             display: flex; align-items: center; justify-content: center;
-             background: linear-gradient(135deg, #F0932B, #EB6E24); }
-.step .t { font-weight: 700; color: #2B2118; font-size: 1.05rem; }
-.step .d { color: #7A6650; font-size: .85rem; margin-top: .15rem; }
+/* HOW-TO (satu kartu panduan, bukan tombol) */
+.howto { background: #fff; border: 1px solid #F6E3CE; border-radius: 20px; padding: 1.1rem 1.3rem 1.2rem;
+         box-shadow: 0 8px 26px -14px rgba(120, 60, 10, .3); margin-bottom: 1rem; cursor: default; }
+.howto .head { font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+               color: #9A7B5C; margin-bottom: .9rem; }
+.howto .row { display: flex; gap: .9rem; align-items: flex-start; position: relative; padding-bottom: 1.1rem; }
+.howto .row:last-child { padding-bottom: 0; }
+.howto .row:not(:last-child)::before { content: ""; position: absolute; left: 15px; top: 34px; bottom: 2px;
+                                       width: 2px; background: #F6D9B8; }
+.howto .num { flex: 0 0 auto; width: 32px; height: 32px; border-radius: 50%; border: 2px solid #F0932B;
+              background: #FFF1DE; color: #B34A0E; font-weight: 800; font-size: .85rem;
+              display: flex; align-items: center; justify-content: center; }
+.howto .t { font-weight: 700; color: #2B2118; font-size: 1rem; line-height: 32px; }
+.howto .d { color: #7A6650; font-size: .85rem; margin-top: -.2rem; }
 
 /* STAT CARDS */
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: .8rem; margin: 0 0 1.2rem; }
@@ -182,20 +189,25 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-uploaded = st.file_uploader("Unggah file Excel (.xlsx)", type=["xlsx", "xlsm"],
-                            label_visibility="collapsed")
+# ------------------------------------------------ panduan + upload ----
+tutorial_slot = st.empty()  # tempat panduan, tampil di ATAS kotak upload
+uploaded = st.file_uploader("Mulai di sini: unggah file Excel (.xlsx)", type=["xlsx", "xlsm"])
 
 if not uploaded:
-    c1, c2, c3 = st.columns(3)
-    for col, n, t, d in [
-        (c1, 1, "Unggah", "Seret & lepas file Excel Kecamatan Dalam Angka."),
-        (c2, 2, "Atur", "Pilih sheet, kolom, satuan, dan orientasi grafik."),
-        (c3, 3, "Unduh", "Simpan grafik sebagai PNG, satu per satu atau semua sekaligus."),
-    ]:
-        with col.container(border=True):
-            st.markdown(f'<div class="step"><div class="num">{n}</div>'
-                        f'<div><div class="t">{t}</div><div class="d">{d}</div></div></div>',
-                        unsafe_allow_html=True)
+    steps = [
+        ("Unggah", "Pilih file Excel Kecamatan Dalam Angka lewat kotak di bawah."),
+        ("Atur", "Pilih sheet, kolom, satuan, dan orientasi grafik."),
+        ("Unduh", "Simpan grafik sebagai PNG, satu per satu atau semua sekaligus."),
+    ]
+    rows = "".join(
+        f'<div class="row"><div class="num">{i}</div>'
+        f'<div><div class="t">{t}</div><div class="d">{d}</div></div></div>'
+        for i, (t, d) in enumerate(steps, 1)
+    )
+    tutorial_slot.markdown(
+        f'<div class="howto"><div class="head">Cara menggunakan</div>{rows}</div>',
+        unsafe_allow_html=True,
+    )
     st.stop()
 
 file_bytes = uploaded.getvalue()
