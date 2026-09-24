@@ -14,7 +14,7 @@ from chart_core import (
 )
 
 BASE_DIR = Path(__file__).parent
-LOGO_PATH = BASE_DIR / "logo-bps.webp"
+LOGO_PATH = BASE_DIR / "logo-bps.png"
 BRAND = "BPS Lampung Utara"
 
 
