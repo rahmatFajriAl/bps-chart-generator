@@ -1,4 +1,7 @@
 streamlit
 openpyxl
-matplotlib
+defusedxml
+pandas
 numpy
+matplotlib
+Pillow
