@@ -1,9 +1,11 @@
 import matplotlib
 matplotlib.use('Agg')
 import re
+import io as _io
 import json
 import textwrap
 import numpy as np
+import pandas as pd
 import openpyxl
 import matplotlib.pyplot as plt
 
@@ -77,8 +79,8 @@ def normalize_series_values(series_values):
 
 
 # =========================================================================
-# 2. PEMBACA SHEET — otomatis mengenali header 1 baris ATAU header 2 baris
-#    bertingkat (pakai info MERGE CELL ASLI, bukan tebak-tebakan), dan
+# 2. PEMBACA SHEET EXCEL — otomatis mengenali header 1 baris ATAU header 2
+#    baris bertingkat (pakai info MERGE CELL ASLI, bukan tebak-tebakan), dan
 #    otomatis mengabaikan kolom "hantu" (header kosong & bukan bagian merge)
 # =========================================================================
 _CODE_ROW_RE = re.compile(r"^\(\d+\)$")
@@ -153,6 +155,18 @@ def _is_total_like(label, all_labels):
     return False
 
 
+def _read_meta(wb):
+    """Baca metadata dari sheet tersembunyi '_meta' (dibuat oleh wizard 'Buat Tabel Baru'),
+    kalau tidak ada, kembalikan dict kosong -> nilai default dipakai di tempat lain."""
+    if "_meta" not in wb.sheetnames:
+        return {}
+    meta = {}
+    for row in wb["_meta"].iter_rows(values_only=True):
+        if row and row[0]:
+            meta[str(row[0]).strip()] = row[1] if len(row) > 1 else None
+    return meta
+
+
 def load_sheet(path, sheet_name):
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb[sheet_name]
@@ -174,6 +188,8 @@ def load_sheet(path, sheet_name):
     series_values = normalize_series_values(series_values_raw)
     categories_clean = [c.strip() for c in categories_raw]
     is_total_row = [_is_total_like(c, categories_raw) for c in categories_raw]
+    meta = _read_meta(wb)
+    source = (str(meta.get("Sumber Data")).strip() if meta.get("Sumber Data") else "") or None
 
     return {
         "title": str(title).strip(),
@@ -182,13 +198,81 @@ def load_sheet(path, sheet_name):
         "series_labels": series_labels,
         "series_values": series_values,
         "is_total_row": is_total_row,
+        "source": source,
     }
 
 
-import re
-import textwrap
-import numpy as np
-import matplotlib.pyplot as plt
+# =========================================================================
+# 2b. PEMBACA CSV — struktur lebih sederhana daripada Excel (tidak ada merge
+#     cell / header bertingkat), tapi tetap dikembalikan dalam bentuk data
+#     yang SAMA dengan load_sheet() supaya bisa dipakai plot_chart() apa
+#     adanya. Delimiter & encoding dideteksi otomatis supaya file CSV dari
+#     berbagai sumber (koma, titik-koma, Excel Windows) tetap terbaca.
+# =========================================================================
+def _decode_csv_bytes(raw):
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _read_csv_bytes(file_bytes):
+    text = _decode_csv_bytes(file_bytes)
+    try:
+        df = pd.read_csv(_io.StringIO(text), sep=None, engine="python",
+                         dtype=str, keep_default_na=False)
+    except Exception:
+        # fallback kalau deteksi delimiter otomatis gagal (mis. file 1 kolom)
+        df = pd.read_csv(_io.StringIO(text), sep=";", dtype=str, keep_default_na=False)
+    # buang kolom "Unnamed" kosong yang kadang muncul dari trailing delimiter
+    df = df.loc[:, ~df.columns.str.match(r"^Unnamed", na=False) | (df.astype(str).ne("").any())]
+    return df
+
+
+def load_csv(file_bytes, title=None):
+    """
+    Baca file CSV jadi struktur data yang sama dengan load_sheet(): kolom
+    pertama dianggap kategori (baris/wilayah), kolom lainnya jadi seri data
+    numerik. CSV tidak punya konsep sheet, jadi seluruh file diperlakukan
+    sebagai satu "sheet" tunggal.
+    """
+    if isinstance(file_bytes, (bytes, bytearray)):
+        raw = bytes(file_bytes)
+    else:
+        raw = file_bytes.read()
+
+    df = _read_csv_bytes(raw)
+    if df.shape[1] < 2:
+        raise ValueError("File CSV harus punya minimal 2 kolom: kategori + 1 kolom data.")
+
+    category_label = str(df.columns[0]).strip()
+    series_labels = [str(c).strip() for c in df.columns[1:]]
+
+    categories_raw = df.iloc[:, 0].astype(str).tolist()
+    series_values_raw = {lbl: df.iloc[:, i + 1].tolist() for i, lbl in enumerate(series_labels)}
+
+    keep_idx = [
+        i for i, cat in enumerate(categories_raw)
+        if cat.strip() or any(str(series_values_raw[lbl][i]).strip() for lbl in series_labels)
+    ]
+    categories_raw = [categories_raw[i] for i in keep_idx]
+    series_values_raw = {lbl: [vals[i] for i in keep_idx] for lbl, vals in series_values_raw.items()}
+
+    series_values = normalize_series_values(series_values_raw)
+    categories_clean = [c.strip() for c in categories_raw]
+    is_total_row = [_is_total_like(c, categories_raw) for c in categories_raw]
+
+    return {
+        "title": (title or "Data CSV").strip(),
+        "category_label": category_label,
+        "categories": categories_clean,
+        "series_labels": series_labels,
+        "series_values": series_values,
+        "is_total_row": is_total_row,
+    }
+
 
 # =========================================================================
 # Palet warna
@@ -331,8 +415,11 @@ def _filtered_data(data, exclude_totals, columns):
     return categories, series_labels, series_values
 
 
+DEFAULT_SOURCE = "BPS, Pendataan Potensi Desa (Podes) 2024"
+
+
 def _footer(fig, data, figure_number):
-    footer = "Sumber: BPS, Pendataan Potensi Desa (Podes) 2024"
+    footer = f"Sumber: {data.get('source') or DEFAULT_SOURCE}"
     if figure_number:
         footer = f"Gambar {figure_number}   |   " + footer
     fig.text(0.02, 0.005, footer, fontsize=8, style="italic")
@@ -463,3 +550,108 @@ def plot_chart(data, exclude_totals=True, figure_number="", save_path=None,
         print(f"Chart disimpan: {save_path}")
 
     return fig
+
+
+# =========================================================================
+# 3. PEMBUAT TABEL BARU DARI NOL (wizard "Buat Tabel Baru")
+#    Menghasilkan file .xlsx dengan struktur PERSIS sama dengan yang dibaca
+#    load_sheet() (judul di A1, header 1 baris, baris kode "(0)(1)(2)...",
+#    lalu data), plus sheet tersembunyi "_meta" utk menyimpan metadata
+#    (judul, no tabel, sumber data) supaya ikut terbawa kalau file ini
+#    dibuka lagi nanti.
+# =========================================================================
+import datetime as _dt
+
+
+def _safe_sheet_name(name, fallback="Data"):
+    name = (name or fallback).strip()
+    for ch in ("\\", "/", "*", "[", "]", ":", "?"):
+        name = name.replace(ch, "-")
+    return (name[:31] or fallback)
+
+
+def build_table_workbook(judul, no_tabel, sumber, category_label, row_names, col_names, values):
+    """
+    values: list-of-list angka (boleh None/NaN utk sel kosong), ukuran
+    len(row_names) x len(col_names), urutan sama dgn row_names/col_names.
+    Tampilan dibuat netral (abu-abu/hitam-putih) meniru gaya tabel dokumen
+    resmi BPS: header abu-abu tebal, baris kode miring, garis kotak penuh.
+    """
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+
+    thin = Side(style="thin", color="808080")
+    medium = Side(style="medium", color="000000")
+    border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill("solid", fgColor="D9D9D9")
+    stripe_fill = PatternFill("solid", fgColor="F5F5F5")
+
+    n_cols = len(col_names) + 1   # +1 utk kolom kategori (A)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = _safe_sheet_name(no_tabel)
+
+    # --- baris 1: judul, digabung (merge) selebar tabel, garis tebal di bawahnya ---
+    ws.cell(1, 1, judul or "Tabel Baru")
+    if n_cols > 1:
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+    for j in range(1, n_cols + 1):
+        ws.cell(1, j).border = Border(bottom=medium)
+    title_cell = ws.cell(1, 1)
+    title_cell.font = Font(bold=True, size=12)
+    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 24
+
+    # --- baris 2: header kolom (abu-abu, tebal, rata tengah, bisa 2 baris) ---
+    header_cells = [ws.cell(2, 1, category_label or "Wilayah")]
+    for j, col in enumerate(col_names, start=2):
+        header_cells.append(ws.cell(2, j, col))
+    for c in header_cells:
+        c.font = Font(bold=True, color="000000")
+        c.fill = header_fill
+        c.border = border_all
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[2].height = 34
+
+    # --- baris 3: baris kode "(1) (2) (3) ..." (miring, tipis) ---
+    code_cells = [ws.cell(3, 1, "(1)")]
+    for j in range(2, n_cols + 1):
+        code_cells.append(ws.cell(3, j, f"({j})"))
+    for c in code_cells:
+        c.font = Font(italic=True, size=9, color="595959")
+        c.border = border_all
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    # --- baris data ---
+    for i, row_name in enumerate(row_names):
+        r = 4 + i
+        name_cell = ws.cell(r, 1, row_name)
+        name_cell.border = border_all
+        name_cell.alignment = Alignment(horizontal="left", vertical="center")
+        for j, _col in enumerate(col_names):
+            val = values[i][j] if i < len(values) and j < len(values[i]) else None
+            if isinstance(val, float) and np.isnan(val):
+                val = None
+            cell = ws.cell(r, j + 2, val)
+            cell.border = border_all
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        if i % 2 == 1:  # baris selang-seling, biar gampang dibaca kalau datanya panjang
+            for j in range(1, n_cols + 1):
+                ws.cell(r, j).fill = stripe_fill
+
+    ws.freeze_panes = "B4"
+    ws.column_dimensions["A"].width = max(20, min(32, max((len(n) for n in row_names), default=14) + 4))
+    for j, col in enumerate(col_names, start=2):
+        letter = ws.cell(2, j).column_letter
+        ws.column_dimensions[letter].width = max(14, min(22, len(col) // 2 + 10))
+
+    meta = wb.create_sheet("_meta")
+    meta.sheet_state = "hidden"
+    meta.append(["Judul Tabel", judul or ""])
+    meta.append(["No Tabel", no_tabel or ""])
+    meta.append(["Sumber Data", sumber or ""])
+    meta.append(["Dibuat", _dt.datetime.now().strftime("%Y-%m-%d %H:%M")])
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
