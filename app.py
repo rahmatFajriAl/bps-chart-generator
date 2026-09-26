@@ -59,6 +59,7 @@ def load_logo():
 
 
 LOGO_IMG, LOGO_B64, LOGO_MIME = load_logo()
+FOOTER_HTML = f'<div class="footer-note">Chart Generator • {escape(BRAND)}<br>by AlFajri MagangHub Batch 1 | 2026</div>'
 
 
 @st.cache_resource
@@ -283,7 +284,7 @@ h3 { font-weight: 800 !important; color: var(--ink); letter-spacing: -.01em; }
                border-radius: 14px; }
 .chart-frame img { max-width: none; border-radius: 14px; background: #fff; transition: width .25s var(--ease); }
 
-.footer-note { text-align: center; color: var(--muted); font-size: .78rem; margin-top: 2.2rem; letter-spacing: .02em; }
+.footer-note { text-align: center; color: var(--muted); font-size: .78rem; margin-top: 2.2rem; letter-spacing: .02em; line-height: 1.6; }
 
 /* MOBILE */
 @media (max-width: 768px) {
@@ -387,7 +388,7 @@ def render_landing():
             if st.button("Kembali ke halaman utama", use_container_width=True, key="back_home"):
                 st.session_state["view"] = "home"
                 st.rerun()
-    st.markdown(f'<div class="footer-note">Chart Generator • {escape(BRAND)}</div>', unsafe_allow_html=True)
+    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
     st.stop()
 
 
@@ -602,7 +603,7 @@ if st.session_state.view_page == "tables":
                                            mime=MIME.get(rec["ext"], "application/octet-stream"),
                                            key=f"dl_{rid}", use_container_width=True)
 
-    st.markdown(f'<div class="footer-note">Chart Generator • {escape(BRAND)}</div>', unsafe_allow_html=True)
+    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
     st.stop()
 
 # ------------------------------------------------------------------ hero ----
@@ -955,4 +956,4 @@ with tab_all:
                                file_name=security.safe_filename(f"charts_{Path(filename).stem}", "zip"),
                                mime="application/zip")
 
-st.markdown(f'<div class="footer-note">Chart Generator • {escape(BRAND)}</div>', unsafe_allow_html=True)
+st.markdown(FOOTER_HTML, unsafe_allow_html=True)
