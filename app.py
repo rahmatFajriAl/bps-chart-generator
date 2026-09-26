@@ -522,7 +522,7 @@ def reset_builder():
 # --------------------------------------------------------- session init ----
 for k, v in {"history": [], "active_name": None, "builder_df": None, "builder_meta": {},
              "builder_ver": 0, "editing_id": None, "edit_warning": False, "confirm_delete": None,
-             "last_upload_sig": None, "last_reupload_sig": None}.items():
+             "last_upload_sig": None, "last_reupload_sig": None, "view_page": "main"}.items():
     st.session_state.setdefault(k, v)
 
 if "_pending_dbname" in st.session_state:   # widget belum dibuat di run ini -> aman diisi
@@ -531,21 +531,22 @@ if "_pending_dbname" in st.session_state:   # widget belum dibuat di run ini -> 
 if "flash" in st.session_state:
     st.toast(st.session_state.pop("flash"))
 
-# ------------------------------------------------------------------ hero ----
-render_hero("Ubah tabel Excel/CSV <b>Kecamatan Dalam Angka</b> menjadi grafik batang yang rapi dalam hitungan detik.")
-
 active = next((h for h in st.session_state.history if h["name"] == st.session_state.active_name), None)
 
-# --------------------------------------------- panel: tabel tersimpan ----
-# CATATAN: sebelumnya ini ada di st.sidebar, tapi tombol buka/tutup sidebar
-# bawaan Streamlit ternyata tidak konsisten muncul di berbagai versi/device.
-# Diganti jadi expander biasa di halaman utama -- widget standar Streamlit
-# yang PASTI selalu tampil, di HP maupun desktop, tanpa perlu tombol apa pun.
-saved_count = db.count_tables()
-with st.expander(f":material/database: Tabel Tersimpan ({saved_count}) — klik untuk buka, edit, unduh, atau hapus",
-                 expanded=False):
-    st.caption(f"Masuk sebagai **{md_escape(auth.current_user())}**")
-    if st.button(":material/logout: Keluar", use_container_width=True, key="logout_btn"):
+# ============================================== HALAMAN: TABEL TERSIMPAN ====
+# Halaman terpisah (bukan expander) -- dibuka lewat tombol di halaman utama,
+# dan kembali ke halaman utama lewat tombol "Kembali". Perpindahannya lewat
+# session_state, bukan folder pages/ Streamlit, supaya alur login yang sudah
+# ada tidak perlu diubah.
+if st.session_state.view_page == "tables":
+    render_hero("Kelola tabel yang sudah kamu simpan: buka, edit, unduh, atau hapus.")
+
+    top1, top2 = st.columns([1, 3])
+    if top1.button(":material/arrow_back: Kembali", use_container_width=True, key="back_to_main"):
+        st.session_state.view_page = "main"
+        st.rerun()
+    top2.caption(f"Masuk sebagai **{md_escape(auth.current_user())}**")
+    if st.button(":material/logout: Keluar", key="logout_btn"):
         auth.logout()
         st.rerun()
     st.divider()
@@ -581,14 +582,16 @@ with st.expander(f":material/database: Tabel Tersimpan ({saved_count}) — klik 
                     st.rerun()
             else:
                 b1, b2, b3 = st.columns(3)
-                if b1.button(":material/folder_open:", key=f"open_{rid}", help="Buka", use_container_width=True,
+                if b1.button(":material/folder_open: Buka", key=f"open_{rid}", use_container_width=True,
                              type="primary" if active_db_id == rid else "secondary"):
                     open_record(rid)
+                    st.session_state.view_page = "main"
                     st.rerun()
-                if b2.button(":material/edit:", key=f"edit_{rid}", help="Edit", use_container_width=True):
+                if b2.button(":material/edit: Edit", key=f"edit_{rid}", use_container_width=True):
                     start_edit(rid)
+                    st.session_state.view_page = "main"
                     st.rerun()
-                if b3.button(":material/delete:", key=f"del_{rid}", help="Hapus", use_container_width=True):
+                if b3.button(":material/delete: Hapus", key=f"del_{rid}", use_container_width=True):
                     st.session_state.confirm_delete = rid
                     st.rerun()
                 if active_db_id == rid:  # blob hanya dimuat untuk tabel yang sedang dibuka
@@ -598,6 +601,19 @@ with st.expander(f":material/database: Tabel Tersimpan ({saved_count}) — klik 
                                            file_name=security.safe_filename(rec["name"], rec["ext"]),
                                            mime=MIME.get(rec["ext"], "application/octet-stream"),
                                            key=f"dl_{rid}", use_container_width=True)
+
+    st.markdown(f'<div class="footer-note">Chart Generator • {escape(BRAND)}</div>', unsafe_allow_html=True)
+    st.stop()
+
+# ------------------------------------------------------------------ hero ----
+render_hero("Ubah tabel Excel/CSV <b>Kecamatan Dalam Angka</b> menjadi grafik batang yang rapi dalam hitungan detik.")
+
+# --------------------------------------------- tombol ke halaman tabel ----
+saved_count = db.count_tables()
+if st.button(f":material/database: Tabel Tersimpan ({saved_count}) — klik untuk buka, edit, unduh, atau hapus",
+             use_container_width=True, key="go_tables"):
+    st.session_state.view_page = "tables"
+    st.rerun()
 
 tutorial_slot = st.empty()  # panduan tampil di ATAS kotak upload, hilang setelah ada file aktif
 uploaded = st.file_uploader("Mulai di sini: unggah file Excel atau CSV", type=["xlsx", "xlsm", "csv"])
