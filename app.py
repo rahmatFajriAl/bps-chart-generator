@@ -15,12 +15,14 @@ import streamlit as st
 
 from chart_core import (
     load_sheet, load_csv, plot_chart, classify_column, short_series_labels,
-    guess_unit_from_title, build_table_workbook, _TAG,
+    guess_unit_from_title, build_table_workbook, _TAG, DEFAULT_SOURCE,
 )
 import auth
 import db
 import security
 from security import md_escape
+from narrative import build_narrative
+from app_theme import inject_app_theme, render_topbar
 
 BASE_DIR = Path(__file__).parent
 LOGO_PATH = BASE_DIR / "logo-bps.png"
@@ -71,9 +73,11 @@ def _init_db():
 _init_db()
 AUTHED = auth.is_authenticated()
 
+# Sidebar tidak dipakai lagi (isinya sudah pindah ke halaman "Tabel Tersimpan"),
+# jadi default-nya tertutup supaya tidak menutupi layar HP.
 st.set_page_config(page_title=f"Chart Generator | {BRAND}",
                    page_icon=LOGO_IMG if LOGO_IMG else ":material/bar_chart:",
-                   layout="wide", initial_sidebar_state="expanded" if AUTHED else "collapsed")
+                   layout="wide", initial_sidebar_state="collapsed")
 
 # ------------------------------------------------------------------ CSS ----
 st.markdown("""
@@ -279,8 +283,14 @@ h3 { font-weight: 800 !important; color: var(--ink); letter-spacing: -.01em; }
 .stTabs [aria-selected="true"] { background: linear-gradient(135deg, #FFF1DE, #FFE3C2); color: var(--brand-3); font-weight: 800; }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
 
+/* tombol layar penuh bawaan st.image: dibuat kontras supaya terlihat */
+[data-testid="StyledFullScreenButton"], [data-testid="stImageFullScreenButton"] {
+  background: var(--brand-2) !important; color: #fff !important; border-radius: 10px !important;
+  opacity: 1 !important; box-shadow: var(--shadow-1) !important;
+}
+
 /* IMAGE PREVIEW */
-.chart-frame { overflow: auto; text-align: center; -webkit-overflow-scrolling: touch; touch-action: pinch-zoom;
+.chart-frame { overflow: auto; text-align: center; -webkit-overflow-scrolling: touch; touch-action: pan-x pan-y pinch-zoom;
                border-radius: 14px; }
 .chart-frame img { max-width: none; border-radius: 14px; background: #fff; transition: width .25s var(--ease); }
 
@@ -395,6 +405,8 @@ def render_landing():
 if not AUTHED:
     render_landing()
 
+inject_app_theme()  # tema baru khusus tampilan setelah login
+
 # ------------------------------------------------------------ helper ----
 WIB = timezone(timedelta(hours=7))
 
@@ -436,6 +448,37 @@ def fig_to_png(fig) -> bytes:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
     return buf.getvalue()
+
+
+# Chrome/Safari memblokir link data:image di tab baru (halaman jadi kosong), jadi
+# "gambar penuh" ditampilkan lewat dialog Streamlit. st.image punya tombol layar penuh bawaan.
+if hasattr(st, "dialog"):
+    @st.dialog("Grafik ukuran penuh", width="large")
+    def show_full_chart(png_bytes):
+        st.caption("Gambar ditampilkan selebar jendela. Untuk file resolusi penuh, pakai tombol Download PNG.")
+        st.image(png_bytes)
+else:
+    def show_full_chart(png_bytes):
+        st.image(png_bytes)
+
+
+# Dialog "isi nama file lalu download". Tombol download ada DI DALAM dialog, jadi
+# nama yang diketik langsung dipakai. Nama dibersihkan (security.safe_filename).
+def _download_chart_body(png_bytes, default_name):
+    name = st.text_input("Nama file", value=default_name, max_chars=80, key="png_name_input")
+    fname = security.safe_filename(name.strip() or default_name, "png")
+    st.caption(f"Akan tersimpan sebagai: **{md_escape(fname)}**")
+    st.download_button(":material/download: Download", png_bytes, file_name=fname, mime="image/png",
+                       type="primary", use_container_width=True, key="png_dl_final")
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("Simpan grafik sebagai PNG")
+    def download_chart_dialog(png_bytes, default_name):
+        _download_chart_body(png_bytes, default_name)
+else:
+    def download_chart_dialog(png_bytes, default_name):
+        _download_chart_body(png_bytes, default_name)
 
 
 def stat_cards(items):
@@ -520,10 +563,63 @@ def reset_builder():
     st.session_state.builder_ver += 1
 
 
+def apply_preview_edit(active, data, sheet, edited_df, new_labels, new_title, save_db=False):
+    """Bangun ulang workbook dari hasil edit, cek hasil bacanya cocok, lalu pasang ke file aktif.
+    Return pesan error (str) atau None kalau sukses."""
+    old_labels = data["series_labels"]
+    n_rows = len(data["categories"])
+    if len(edited_df) != n_rows:
+        return "Jumlah baris berubah, edit dibatalkan."
+
+    labels_clean = [security.safe_name(n, 100) or o for n, o in zip(new_labels, old_labels)]
+    if len({l.lower() for l in labels_clean}) != len(labels_clean):
+        return "Ada nama kolom yang kembar. Beri nama berbeda untuk tiap kolom."
+
+    def _txt(v):
+        return "" if (v is None or (isinstance(v, float) and np.isnan(v))) else v
+    row_names = [security.safe_name(_txt(n), 100) or o
+                 for n, o in zip(edited_df["c_row"].tolist(), data["categories"])]
+
+    cols_vals = [pd.to_numeric(edited_df[f"c{j}"], errors="coerce").to_numpy(dtype=float)
+                 for j in range(len(old_labels))]
+    values = [[cols_vals[j][i] for j in range(len(old_labels))] for i in range(n_rows)]
+    title = security.safe_name(new_title, 200) or data["title"]
+
+    new_bytes = build_table_workbook(title, sheet, data.get("source") or "",
+                                     data.get("category_label") or "Wilayah",
+                                     row_names, labels_clean, values)
+    err = security.validate_upload("x.xlsx", new_bytes)
+    if err:
+        return err
+
+    # pengaman: baca ulang lewat pembaca yang sama, pastikan angkanya tidak berubah diam-diam
+    try:
+        chk = load_sheet(io.BytesIO(new_bytes), get_sheet_names(new_bytes, "xlsx")[0])
+        if chk["series_labels"] != labels_clean or len(chk["categories"]) != n_rows:
+            return "Hasil edit tidak terbaca konsisten (jumlah baris/kolom berubah). Edit dibatalkan."
+        for j, lbl in enumerate(labels_clean):
+            a = np.array(chk["series_values"][lbl], dtype=float)
+            if not np.allclose(a, cols_vals[j], equal_nan=True):
+                return f"Angka di kolom '{lbl}' berubah saat dibaca ulang. Edit dibatalkan supaya data tidak rusak."
+    except Exception as e:
+        return f"Gagal memeriksa hasil edit: {e}"
+
+    if active["ext"] == "csv":
+        active["name"] = security.safe_filename(Path(active["name"]).stem, "xlsx")
+    active["bytes"], active["ext"] = new_bytes, "xlsx"
+    st.session_state.active_name = active["name"]
+    if save_db and active.get("db_id"):
+        rec = db.get_table(active["db_id"])
+        if rec:
+            db.update_table(active["db_id"], rec["name"], "xlsx", new_bytes)
+    return None
+
+
 # --------------------------------------------------------- session init ----
 for k, v in {"history": [], "active_name": None, "builder_df": None, "builder_meta": {},
              "builder_ver": 0, "editing_id": None, "edit_warning": False, "confirm_delete": None,
-             "last_upload_sig": None, "last_reupload_sig": None, "view_page": "main"}.items():
+             "last_upload_sig": None, "last_reupload_sig": None, "view_page": "main",
+             "preview_edit_target": None, "prev_edit_ver": 0}.items():
     st.session_state.setdefault(k, v)
 
 if "_pending_dbname" in st.session_state:   # widget belum dibuat di run ini -> aman diisi
@@ -534,13 +630,61 @@ if "flash" in st.session_state:
 
 active = next((h for h in st.session_state.history if h["name"] == st.session_state.active_name), None)
 
+# ==================================================== HALAMAN: AKUN ====
+LOG_LABEL = {
+    "success": "Berhasil masuk",
+    "fail": "Gagal (username/password salah)",
+    "locked": "Ditolak (akun terkunci sementara)",
+    "pw_changed": "Kata sandi diubah",
+    "pw_fail": "Gagal ganti kata sandi",
+}
+
+if st.session_state.view_page == "account":
+    render_topbar(BRAND, logo_html, "Akun", "Ganti kata sandi dan lihat riwayat login", auth.current_user())
+
+    ac1, ac2 = st.columns([1, 3])
+    if ac1.button(":material/arrow_back: Kembali", use_container_width=True, key="back_from_account"):
+        st.session_state.view_page = "main"
+        st.rerun()
+    ac2.caption(f"Masuk sebagai **{md_escape(auth.current_user())}**")
+
+    with st.container(border=True):
+        st.markdown("### :material/key: Ganti kata sandi")
+        with st.form("change_pw_form", clear_on_submit=True):
+            pw_cur = st.text_input("Kata sandi saat ini", type="password", max_chars=128)
+            pw_new = st.text_input(f"Kata sandi baru (minimal {auth.MIN_PW_LEN} karakter)", type="password",
+                                   max_chars=128)
+            pw_new2 = st.text_input("Ulangi kata sandi baru", type="password", max_chars=128)
+            pw_submit = st.form_submit_button(":material/save: Simpan kata sandi", type="primary",
+                                              use_container_width=True)
+        if pw_submit:
+            ok_pw, msg_pw = auth.change_password(pw_cur, pw_new, pw_new2)
+            (st.success if ok_pw else st.error)(msg_pw)
+        st.caption("Kata sandi baru disimpan di database dan menggantikan yang ada di Secrets. Di Streamlit Cloud, "
+                   "jika database ter-reset saat aplikasi restart, kata sandi kembali ke yang ada di Secrets.")
+
+    with st.container(border=True):
+        st.markdown("### :material/history: Riwayat login")
+        st.caption("30 catatan terakhir. Yang dicatat hanya waktu dan hasilnya, bukan teks yang diketik.")
+        log_rows = db.list_login_log(30)
+        if not log_rows:
+            st.caption("Belum ada catatan.")
+        else:
+            st.dataframe(
+                pd.DataFrame({"Waktu (WIB)": [fmt_dt(r["ts"]) for r in log_rows],
+                              "Hasil": [LOG_LABEL.get(r["status"], r["status"]) for r in log_rows]}),
+                hide_index=True, use_container_width=True)
+
+    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
+    st.stop()
+
 # ============================================== HALAMAN: TABEL TERSIMPAN ====
 # Halaman terpisah (bukan expander) -- dibuka lewat tombol di halaman utama,
 # dan kembali ke halaman utama lewat tombol "Kembali". Perpindahannya lewat
 # session_state, bukan folder pages/ Streamlit, supaya alur login yang sudah
 # ada tidak perlu diubah.
 if st.session_state.view_page == "tables":
-    render_hero("Kelola tabel yang sudah kamu simpan: buka, edit, unduh, atau hapus.")
+    render_topbar(BRAND, logo_html, "Tabel Tersimpan", "Buka, edit, unduh, atau hapus tabel", auth.current_user())
 
     top1, top2 = st.columns([1, 3])
     if top1.button(":material/arrow_back: Kembali", use_container_width=True, key="back_to_main"):
@@ -607,13 +751,18 @@ if st.session_state.view_page == "tables":
     st.stop()
 
 # ------------------------------------------------------------------ hero ----
-render_hero("Ubah tabel Excel/CSV <b>Kecamatan Dalam Angka</b> menjadi grafik batang yang rapi dalam hitungan detik.")
+render_topbar(BRAND, logo_html, "Chart Generator",
+              "Ubah tabel <b>Kecamatan Dalam Angka</b> jadi grafik batang", auth.current_user())
 
 # --------------------------------------------- tombol ke halaman tabel ----
 saved_count = db.count_tables()
-if st.button(f":material/database: Tabel Tersimpan ({saved_count}) — klik untuk buka, edit, unduh, atau hapus",
-             use_container_width=True, key="go_tables"):
+nav1, nav2 = st.columns([4, 1])
+if nav1.button(f":material/database: Tabel Tersimpan ({saved_count})",
+               use_container_width=True, key="go_tables"):
     st.session_state.view_page = "tables"
+    st.rerun()
+if nav2.button(":material/manage_accounts: Akun", use_container_width=True, key="go_account"):
+    st.session_state.view_page = "account"
     st.rerun()
 
 tutorial_slot = st.empty()  # panduan tampil di ATAS kotak upload, hilang setelah ada file aktif
@@ -785,20 +934,22 @@ if st.session_state.history:
     with st.container(border=True):
         st.markdown("### :material/history: Riwayat File")
         st.caption("Klik untuk berpindah antar file yang sedang dibuka di sesi ini.")
-        cols = st.columns(len(st.session_state.history))
-        for col, h in zip(cols, st.session_state.history):
-            is_active = h["name"] == st.session_state.active_name
-            icon = ":material/check_circle: " if is_active else ":material/description: "
-            if col.button(icon + md_escape(h["name"]), key=f"hist_{h['name']}", use_container_width=True,
-                          type="primary" if is_active else "secondary"):
-                st.session_state.active_name = h["name"]
-                st.rerun()
+        hist_items = st.session_state.history
+        for i in range(0, len(hist_items), 3):   # maksimal 3 tombol per baris
+            cols = st.columns(3)
+            for col, h in zip(cols, hist_items[i:i + 3]):
+                is_active = h["name"] == st.session_state.active_name
+                icon = ":material/check_circle: " if is_active else ":material/description: "
+                if col.button(icon + md_escape(h["name"]), key=f"hist_{h['name']}", use_container_width=True,
+                              type="primary" if is_active else "secondary"):
+                    st.session_state.active_name = h["name"]
+                    st.rerun()
     active = next((h for h in st.session_state.history if h["name"] == st.session_state.active_name), None)
 
 # ------------------------------------------------------------ tutorial ----
 if active is None:
     steps = [
-        ("Unggah", "Pilih file Excel (.xlsx) atau CSV lewat kotak di atas, atau buka tabel tersimpan dari sidebar."),
+        ("Unggah", "Pilih file Excel (.xlsx) atau CSV lewat kotak di atas, atau buka lewat tombol Tabel Tersimpan."),
         ("Atur", "Pilih sheet, kolom, satuan, dan orientasi grafik."),
         ("Unduh", "Simpan grafik sebagai PNG, satu per satu atau semua sekaligus."),
     ]
@@ -836,7 +987,7 @@ if active.get("db_id") is None:
                 flash("Tersimpan di database.")
                 st.rerun()
 else:
-    st.caption(":material/database: Tabel ini tersimpan di database (menu di sidebar).")
+    st.caption(":material/database: Tabel ini tersimpan di database (lihat tombol Tabel Tersimpan).")
 
 # -------------------------------------------------------------- controls ----
 with st.container(border=True):
@@ -875,6 +1026,25 @@ with st.container(border=True):
             for lbl, default in zip(chosen, short_series_labels(chosen)):
                 overrides[lbl] = st.text_input(lbl, value=default, key=f"lbl_{filename}_{sheet}_{lbl}", max_chars=40)
 
+    with st.expander(":material/title: Judul, sumber & nomor gambar"):
+        # kunci ikut hash judul+sumber: kalau data diedit, isian kembali ke nilai baru, bukan nyangkut yang lama
+        _k = hashlib.md5(f"{data['title']}|{data.get('source') or ''}".encode()).hexdigest()[:8]
+        chart_title = st.text_input("Judul grafik", value=data["title"], max_chars=200,
+                                    key=f"ct_{filename}_{sheet}_{_k}")
+        chart_source = st.text_input("Sumber data", value=data.get("source") or DEFAULT_SOURCE, max_chars=200,
+                                     key=f"cs_{filename}_{sheet}_{_k}",
+                                     help="Tampil di kaki grafik sebagai 'Sumber: ...'. Kosongkan untuk teks bawaan.")
+        fig_no = st.text_input("Nomor gambar", value=str(sheet), max_chars=20, key=f"cn_{filename}_{sheet}_{_k}",
+                               help="Tampil sebagai 'Gambar ...' di kaki grafik. Kosongkan kalau tidak diperlukan.")
+
+    def _mpl_safe(t):   # tanda $ akan dibaca matplotlib sebagai rumus, jadi di-escape
+        return security.safe_name(t, 200).replace("$", r"\$")
+
+    chart_data = dict(data)
+    chart_data["title"] = _mpl_safe(chart_title) or _mpl_safe(data["title"])
+    chart_data["source"] = _mpl_safe(chart_source) or None
+    chart_fig_no = _mpl_safe(fig_no)
+
 # ----------------------------------------------------------------- stats ----
 stat_cards([
     ("Total Sheet", len(sheet_names)),
@@ -891,7 +1061,7 @@ with tab_chart:
     if not chosen:
         st.warning("Pilih minimal satu kolom dulu ya.")
     else:
-        fig = plot_chart(data, exclude_totals=not include_totals, figure_number=sheet,
+        fig = plot_chart(chart_data, exclude_totals=not include_totals, figure_number=chart_fig_no,
                          unit_hint=unit.strip(), columns=chosen, orientation=orientation,
                          series_label_overrides=overrides, show_series_label=not no_label)
         if fig is None:
@@ -912,21 +1082,78 @@ with tab_chart:
                 )
 
             d1, d2 = st.columns(2)
-            d1.markdown(
-                f'<a class="zoom-link" href="data:image/png;base64,{b64_png}" target="_blank" rel="noopener noreferrer">'
-                f'Buka gambar penuh (bisa di-zoom)</a>',
-                unsafe_allow_html=True,
-            )
-            d2.download_button(":material/download: Download PNG", png,
-                               file_name=security.safe_filename(f"chart_{Path(filename).stem}_{str(sheet).replace('.', '_')}", "png"),
-                               mime="image/png", use_container_width=True)
+            if d1.button(":material/open_in_full: Buka gambar penuh", use_container_width=True,
+                         key="open_full_chart"):
+                show_full_chart(png)
+            if d2.button(":material/download: Download PNG", use_container_width=True, key="open_png_dialog"):
+                download_chart_dialog(png, f"chart_{Path(filename).stem}_{str(sheet).replace('.', '_')}")
+
+            with st.expander(":material/notes: Narasi otomatis (siap disalin)"):
+                narasi = build_narrative(data, chosen, unit=unit.strip(),
+                                         exclude_totals=not include_totals)
+                st.text_area("Teks narasi", value=narasi, height=220,
+                             key=f"narasi_{filename}_{sheet}_{_k}",
+                             help="Bisa diedit dulu sebelum disalin.")
 
 with tab_data:
     st.markdown(f"**{md_escape(data['title'])}**")
     st.caption(f"{len(data['categories'])} baris, {len(labels)} kolom data. "
                f"Cek dulu di sini sebelum bikin grafik, siapa tahu ada data yang aneh atau salah ketik.")
-    df = pd.DataFrame(data["series_values"], index=data["categories"])
-    st.dataframe(df, use_container_width=True)
+
+    edit_target = (filename, sheet)
+    edit_on = st.session_state.get("preview_edit_target") == edit_target
+
+    if not edit_on:
+        if st.button(":material/edit: Edit nama kolom & angka", key="prev_edit_open"):
+            st.session_state.preview_edit_target = edit_target
+            st.session_state.prev_edit_ver += 1
+            st.rerun()
+        df = pd.DataFrame(data["series_values"], index=data["categories"])
+        st.dataframe(df, use_container_width=True)
+    else:
+        ver = st.session_state.prev_edit_ver
+        st.info("Mode edit: ubah judul, nama kolom, nama baris, atau angka. Klik dua kali sel untuk mengetik. "
+                "Perubahan baru berlaku setelah kamu klik **Terapkan**.")
+        if len(sheet_names) > 1:
+            st.warning("File ini punya lebih dari satu sheet. Setelah diterapkan, hanya sheet ini yang dipertahankan "
+                       "(header bertingkat juga diratakan jadi satu baris).")
+
+        new_title = st.text_input("Judul tabel", value=data["title"], key=f"prev_title_{ver}", max_chars=200)
+
+        st.markdown("**Nama kolom**")
+        new_labels = []
+        rcols = st.columns(2)
+        for j, lbl in enumerate(labels):
+            new_labels.append(rcols[j % 2].text_input(f"Kolom {j + 1}", value=lbl, key=f"prev_ren_{ver}_{j}",
+                                                      max_chars=100))
+
+        st.markdown("**Angka & nama baris**")
+        df_edit = pd.DataFrame({"c_row": data["categories"],
+                                **{f"c{j}": data["series_values"][lbl] for j, lbl in enumerate(labels)}})
+        cfg = {"c_row": st.column_config.TextColumn(data.get("category_label") or "Wilayah")}
+        for j, nl in enumerate(new_labels):
+            cfg[f"c{j}"] = st.column_config.NumberColumn(label=nl or labels[j])
+        edited_df = st.data_editor(df_edit, column_config=cfg, hide_index=True, num_rows="fixed",
+                                   use_container_width=True, key=f"prev_editor_{ver}")
+
+        has_db = bool(active.get("db_id"))
+        bcols = st.columns(3 if has_db else 2)
+        do_apply = bcols[0].button(":material/check: Terapkan", type="primary", use_container_width=True,
+                                   key="prev_apply")
+        do_apply_db = has_db and bcols[1].button(":material/save: Terapkan & simpan ke database",
+                                                 use_container_width=True, key="prev_apply_db")
+        if bcols[-1].button(":material/close: Batal", use_container_width=True, key="prev_cancel"):
+            st.session_state.preview_edit_target = None
+            st.rerun()
+
+        if do_apply or do_apply_db:
+            err = apply_preview_edit(active, data, sheet, edited_df, new_labels, new_title, save_db=do_apply_db)
+            if err:
+                st.error(err)
+            else:
+                st.session_state.preview_edit_target = None
+                flash("Perubahan diterapkan dan tersimpan di database." if do_apply_db else "Perubahan diterapkan.")
+                st.rerun()
 
 with tab_all:
     if ext == "csv":
