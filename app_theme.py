@@ -20,7 +20,9 @@ html, body, [class*="css"], .stApp, button, input, textarea, select {
   font-family: 'IBM Plex Sans', system-ui, sans-serif !important;
 }
 .stApp { background: var(--bg) !important; }
-.block-container { max-width: 1180px !important; padding: 3.5rem 1.5rem 4rem !important; }
+.block-container, .stMainBlockContainer {
+  max-width: 1180px !important; padding: 2.5rem 1.5rem 4rem !important;
+}
 
 /* ---------- TOP BAR (pengganti hero besar) ---------- */
 .topbar {
@@ -130,7 +132,7 @@ h3 { font-size: 1.05rem !important; font-weight: 700 !important; color: var(--in
 
 /* ---------- MOBILE ---------- */
 @media (max-width: 768px) {
-  .block-container { padding: 3.5rem .7rem 3rem !important; }
+  .block-container, .stMainBlockContainer { padding: 2rem .7rem 3rem !important; }
   .howto { grid-template-columns: 1fr; gap: 1rem 0; }
   .topbar { padding: .6rem .8rem; gap: .6rem; }
   .topbar .sep { display: none; }
