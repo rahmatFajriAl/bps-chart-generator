@@ -123,3 +123,51 @@ def register_failure(max_fails, lock_seconds):
 def reset_failures():
     with _conn() as c:
         c.execute("UPDATE login_guard SET fail_count = 0, locked_until = 0 WHERE id = 1")
+
+
+# ------------------------------------------- kredensial & riwayat login ----
+def _ensure_auth_tables(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS admin_credentials (
+        id            INTEGER PRIMARY KEY CHECK (id = 1),
+        password_hash TEXT NOT NULL,
+        updated_at    TEXT NOT NULL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS login_log (
+        id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts     TEXT NOT NULL,
+        status TEXT NOT NULL)""")
+
+
+def get_password_override():
+    """(hash, updated_at) kalau kata sandi pernah diganti lewat aplikasi, kalau belum (None, '')."""
+    with _conn() as c:
+        _ensure_auth_tables(c)
+        row = c.execute("SELECT password_hash, updated_at FROM admin_credentials WHERE id = 1").fetchone()
+    return (row["password_hash"], row["updated_at"]) if row else (None, "")
+
+
+def get_credential_stamp():
+    return get_password_override()[1]
+
+
+def set_password_override(password_hash):
+    stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with _conn() as c:
+        _ensure_auth_tables(c)
+        c.execute("INSERT OR REPLACE INTO admin_credentials (id, password_hash, updated_at) VALUES (1, ?, ?)",
+                  (password_hash, stamp))
+    return stamp
+
+
+def log_login(status):
+    """status: success | fail | locked | pw_changed | pw_fail. Hanya hasilnya yang dicatat, bukan teks yang diketik."""
+    with _conn() as c:
+        _ensure_auth_tables(c)
+        c.execute("INSERT INTO login_log (ts, status) VALUES (?, ?)", (_now(), status))
+        c.execute("DELETE FROM login_log WHERE id NOT IN (SELECT id FROM login_log ORDER BY id DESC LIMIT 200)")
+
+
+def list_login_log(limit=30):
+    with _conn() as c:
+        _ensure_auth_tables(c)
+        rows = c.execute("SELECT ts, status FROM login_log ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
