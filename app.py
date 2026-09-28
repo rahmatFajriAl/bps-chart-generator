@@ -407,6 +407,16 @@ if not AUTHED:
 
 inject_app_theme()  # tema baru khusus tampilan setelah login
 
+# Rapatkan jarak atas halaman (menimpa padding dari tema). Ditaruh SETELAH inject_app_theme
+st.markdown("""
+<style>
+.stMainBlockContainer, .block-container { padding-top: 3.5rem !important; }
+@media (max-width: 768px) {
+  .stMainBlockContainer, .block-container { padding-top: 2.75rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ------------------------------------------------------------ helper ----
 WIB = timezone(timedelta(hours=7))
 
